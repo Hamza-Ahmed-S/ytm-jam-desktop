@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.DS_Store
+jam-debug.log
+YouTube-Music-Jam.zip

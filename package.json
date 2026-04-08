@@ -1,0 +1,32 @@
+{
+  "name": "electron-jam",
+  "version": "1.0.0",
+  "description": "YouTube Music with Jam — listen together in real-time",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.ytmjam.app",
+    "productName": "YouTube Music Jam",
+    "win": {
+      "target": "portable",
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "jam-inject.js",
+      "package.json"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^41.2.0",
+    "electron-builder": "^24.13.3"
+  }
+}
