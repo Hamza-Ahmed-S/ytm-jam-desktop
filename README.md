@@ -1,4 +1,4 @@
-# 🎵 YouTube Music Jam — Desktop App
+# 🎵 YouTube Music Jam — Desktop App V3
 
 A powerful, custom desktop client for YouTube Music that brings **real-time synchronized listening** (Jam Sessions) to your desktop. Built with Electron and Socket.io, this app bypasses YouTube's strict security policies to inject a beautiful, Discord-style UI directly into the player.
 
