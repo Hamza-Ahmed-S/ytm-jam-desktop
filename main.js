@@ -1,86 +1,153 @@
 const { app, BrowserWindow, session, ipcMain } = require('electron');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+
+const APP_URL = 'https://music.youtube.com';
 
 let logFile = '';
+let cspHookInstalled = false;
 
-function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
+function log(message) {
+  const line = `[${new Date().toISOString()}] ${message}`;
   console.log(line);
-  if (logFile) {
-    try {
-      fs.appendFileSync(logFile, line + '\n');
-    } catch (e) {
-      // ignore
-    }
+
+  if (!logFile) {
+    return;
+  }
+
+  try {
+    fs.appendFileSync(logFile, `${line}\n`);
+  } catch (_) {
+    // Logging should never crash the app.
   }
 }
 
-log('App source loading...');
-log('__dirname: ' + __dirname);
+function ensureLogFile() {
+  logFile = path.join(app.getPath('userData'), 'jam-debug.log');
 
-const preloadPath = path.join(__dirname, 'preload.js');
-log('Preload path: ' + preloadPath);
+  try {
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.writeFileSync(logFile, `=== JAM DEBUG LOG - ${new Date().toISOString()} ===\n`);
+    log(`Log file ready at: ${logFile}`);
+  } catch (error) {
+    console.error('Failed to create log file:', error.message);
+  }
+}
 
-// ── MAIN WINDOW ───────────────────────────────────────────────────────────────
+function resolvePreloadPath() {
+  const resourcePath = process.resourcesPath || '';
+  const candidates = [
+    path.join(__dirname, 'preload.js'),
+    path.join(resourcePath, 'app.asar', 'preload.js'),
+    path.join(resourcePath, 'preload.js'),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
+
+function installCspBypass() {
+  if (cspHookInstalled) {
+    return;
+  }
+
+  session.defaultSession.webRequest.onHeadersReceived(
+    {
+      urls: ['https://music.youtube.com/*', 'https://*.youtube.com/*'],
+    },
+    (details, callback) => {
+      const headers = { ...details.responseHeaders };
+      delete headers['content-security-policy'];
+      delete headers['Content-Security-Policy'];
+      callback({ responseHeaders: headers });
+    }
+  );
+
+  cspHookInstalled = true;
+  log('Installed CSP bypass for YouTube Music.');
+}
+
 function createWindow() {
-  log('Creating BrowserWindow...');
+  const preloadPath = resolvePreloadPath();
+  log(`Using preload path: ${preloadPath}`);
+  log(`Preload exists: ${fs.existsSync(preloadPath)}`);
 
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    minWidth: 980,
+    minHeight: 640,
     title: 'YouTube Music Jam',
     autoHideMenuBar: true,
+    show: false,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: false,
       nodeIntegration: true,
+      sandbox: false,
       webSecurity: false,
     },
   });
 
-  // Wipe YouTube's CSP so our injected scripts are allowed to run
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const headers = { ...details.responseHeaders };
-    delete headers['content-security-policy'];
-    delete headers['Content-Security-Policy'];
-    callback({ responseHeaders: headers });
+  win.once('ready-to-show', () => {
+    win.show();
+    log('Window is ready to show.');
   });
 
   win.webContents.on('did-start-loading', () => log('Page: did-start-loading'));
-  win.webContents.on('did-finish-load',   () => log('Page: did-finish-load'));
-  win.webContents.on('did-fail-load',     (e, code, desc) => log(`Page: did-fail-load code=${code} desc=${desc}`));
-  win.webContents.on('dom-ready',         () => log('Page: dom-ready'));
-  win.webContents.on('preload-error',     (e, preloadPath, err) => log(`PRELOAD ERROR: ${err}`));
-
-  // Mirror renderer console into our log file
-  win.webContents.on('console-message', (e, level, msg, line) => {
-    log(`[Renderer L${level} line:${line}] ${msg}`);
+  win.webContents.on('did-finish-load', () => log('Page: did-finish-load'));
+  win.webContents.on('dom-ready', () => log('Page: dom-ready'));
+  win.webContents.on('did-fail-load', (_event, code, desc, url) => {
+    log(`Page: did-fail-load code=${code} desc=${desc} url=${url}`);
+  });
+  win.webContents.on('preload-error', (_event, preloadFile, error) => {
+    log(`PRELOAD ERROR in ${preloadFile}: ${error}`);
+  });
+  win.webContents.on('render-process-gone', (_event, details) => {
+    log(`Renderer gone: reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  win.webContents.on('console-message', (_event, level, msg, line, sourceId) => {
+    log(`[Renderer L${level} line:${line}] ${msg} (${sourceId})`);
   });
 
-  log('Loading https://music.youtube.com ...');
-  win.loadURL('https://music.youtube.com');
+  log(`Loading ${APP_URL} ...`);
+  win.loadURL(APP_URL).catch((error) => {
+    log(`loadURL failed: ${error.message}`);
+  });
 }
 
-app.whenReady().then(() => {
-  // Use user's safe AppData folder to store logs so it never crashes ASAR!
-  logFile = path.join(app.getPath('userData'), 'jam-debug.log');
-  try {
-    fs.writeFileSync(logFile, `=== JAM DEBUG LOG - ${new Date().toISOString()} ===\n`);
-    log('Successfully created log file at: ' + logFile);
-  } catch (e) {
-    console.error('Failed to create log file: ' + e.message);
-  }
+process.on('uncaughtException', (error) => {
+  log(`UNCAUGHT EXCEPTION: ${error.stack || error.message}`);
+});
 
-  ipcMain.on('log', (event, msg) => {
-    log('[PRELOAD] ' + msg);
+process.on('unhandledRejection', (reason) => {
+  const text = reason && reason.stack ? reason.stack : String(reason);
+  log(`UNHANDLED REJECTION: ${text}`);
+});
+
+app.whenReady().then(() => {
+  ensureLogFile();
+  installCspBypass();
+
+  ipcMain.on('log', (_event, message) => {
+    log(`[PRELOAD] ${message}`);
   });
 
-  log('app is ready');
+  log('App is ready.');
+  log(`__dirname: ${__dirname}`);
+  log(`process.resourcesPath: ${process.resourcesPath}`);
+
   createWindow();
 });
 
 app.on('window-all-closed', () => {
-  log('All windows closed, quitting.');
-  if (process.platform !== 'darwin') app.quit();
+  log('All windows closed.');
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
 });
