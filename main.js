@@ -1,23 +1,26 @@
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// ── LOGGER ───────────────────────────────────────────────────────────────────
-const logFile = path.join(__dirname, 'jam-debug.log');
-fs.writeFileSync(logFile, `=== JAM DEBUG LOG - ${new Date().toISOString()} ===\n`);
+let logFile = '';
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  fs.appendFileSync(logFile, line + '\n');
+  if (logFile) {
+    try {
+      fs.appendFileSync(logFile, line + '\n');
+    } catch (e) {
+      // ignore
+    }
+  }
 }
 
-log('App starting...');
+log('App source loading...');
 log('__dirname: ' + __dirname);
 
 const preloadPath = path.join(__dirname, 'preload.js');
 log('Preload path: ' + preloadPath);
-log('Preload exists: ' + fs.existsSync(preloadPath));
 
 // ── MAIN WINDOW ───────────────────────────────────────────────────────────────
 function createWindow() {
@@ -31,7 +34,7 @@ function createWindow() {
     webPreferences: {
       preload: preloadPath,
       contextIsolation: false,
-      nodeIntegration: true,   // needed so preload can use fs/path for logging
+      nodeIntegration: true,
       webSecurity: false,
     },
   });
@@ -60,6 +63,19 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Use user's safe AppData folder to store logs so it never crashes ASAR!
+  logFile = path.join(app.getPath('userData'), 'jam-debug.log');
+  try {
+    fs.writeFileSync(logFile, `=== JAM DEBUG LOG - ${new Date().toISOString()} ===\n`);
+    log('Successfully created log file at: ' + logFile);
+  } catch (e) {
+    console.error('Failed to create log file: ' + e.message);
+  }
+
+  ipcMain.on('log', (event, msg) => {
+    log('[PRELOAD] ' + msg);
+  });
+
   log('app is ready');
   createWindow();
 });

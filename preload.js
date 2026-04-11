@@ -1,14 +1,15 @@
 // preload.js — runs with elevated privileges BEFORE the page's JS starts
 // CSP cannot block this file.
 
-const fs = require('fs');
-const path = require('path');
-const logFile = path.join(__dirname, 'jam-debug.log');
+const { ipcRenderer } = require('electron');
 
 function log(msg) {
-  const line = `[PRELOAD ${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  try { fs.appendFileSync(logFile, line + '\n'); } catch(e) {}
+  // We send the logs to main.js instead of trying to write files ourselves
+  try {
+    ipcRenderer.send('log', msg);
+  } catch (e) {
+    console.log('[PRELOAD] ' + msg);
+  }
 }
 
 log('preload.js started');
@@ -126,9 +127,9 @@ function injectJamUI() {
   log('HTML injected into documentElement.');
 
   // ── Toggle panel ────────────────────────────────────────────────────────
-  const hubBtn   = document.getElementById('jam-hub-btn');
-  const panel    = document.getElementById('jam-panel');
-  const status   = document.getElementById('jam-status');
+  const hubBtn = document.getElementById('jam-hub-btn');
+  const panel = document.getElementById('jam-panel');
+  const status = document.getElementById('jam-status');
   const codeDisp = document.getElementById('jam-code-display');
 
   hubBtn.addEventListener('click', () => {
@@ -146,7 +147,7 @@ function injectJamUI() {
     let roomCode = null;
     let isExternal = false;
 
-    socket.on('connect',    () => { log('Connected to server!'); status.textContent = '✅ Connected'; status.style.color = '#43B581'; });
+    socket.on('connect', () => { log('Connected to server!'); status.textContent = '✅ Connected'; status.style.color = '#43B581'; });
     socket.on('disconnect', () => { log('Disconnected from server'); status.textContent = '❌ Disconnected'; status.style.color = '#F04747'; });
     socket.on('connect_error', (e) => log('Connection error: ' + e.message));
 
@@ -191,7 +192,7 @@ function injectJamUI() {
       const v = document.querySelector('video');
       if (v && !v._jamHooked) {
         v._jamHooked = true;
-        v.addEventListener('play',  () => { if (!isExternal && roomCode) socket.emit('play_music',  { roomCode, time: v.currentTime }); });
+        v.addEventListener('play', () => { if (!isExternal && roomCode) socket.emit('play_music', { roomCode, time: v.currentTime }); });
         v.addEventListener('pause', () => { if (!isExternal && roomCode) socket.emit('pause_music', { roomCode, time: v.currentTime }); });
         log('Video player hooked for sync events.');
       }
