@@ -5,6 +5,7 @@ const SOCKET_SERVER_URL = 'https://ytm-jam-server-production.up.railway.app';
 
 let uiInjected = false;
 let socketScriptRequested = false;
+let lastTrackFingerprint = '';
 
 function log(message) {
   try {
@@ -23,6 +24,74 @@ function appendToHeadOrRoot(node) {
   if (parent) {
     parent.appendChild(node);
   }
+}
+
+function getCurrentTrackInfo() {
+  const url = new URL(window.location.href);
+  const trackId = url.searchParams.get('v') || url.pathname || null;
+  return {
+    url: url.toString(),
+    trackId,
+  };
+}
+
+function fingerprintTrack() {
+  const track = getCurrentTrackInfo();
+  return `${track.trackId || 'no-track'}|${track.url}`;
+}
+
+function waitForVideo(timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+
+    const check = () => {
+      const video = document.querySelector('video');
+      if (video) {
+        resolve(video);
+        return;
+      }
+
+      if (Date.now() - started >= timeoutMs) {
+        resolve(null);
+        return;
+      }
+
+      setTimeout(check, 250);
+    };
+
+    check();
+  });
+}
+
+function getYouTubeUsername() {
+  const candidates = [
+    '#right-content ytmusic-settings-button tp-yt-paper-icon-button[aria-label]',
+    'tp-yt-paper-icon-button[aria-label*="Account"]',
+    'button[aria-label*="Google Account"]',
+    'button[aria-label*="account"]',
+    'img[alt][src*="yt3.ggpht.com"]',
+    'img[alt][src*="googleusercontent"]',
+  ];
+
+  for (const selector of candidates) {
+    const el = document.querySelector(selector);
+    if (!el) {
+      continue;
+    }
+
+    const raw = el.getAttribute('aria-label') || el.getAttribute('alt') || el.textContent || '';
+    const cleaned = raw
+      .replace(/^Google Account:\s*/i, '')
+      .replace(/^Account:\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleaned && !/^sign in$/i.test(cleaned)) {
+      return cleaned;
+    }
+  }
+
+  return 'Guest Listener';
 }
 
 function injectJamUI() {
@@ -150,6 +219,48 @@ function injectJamUI() {
       text-align: center;
       min-height: 16px;
     }
+    #jam-members {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: none;
+    }
+    .jam-members-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: #8f95b2;
+      margin-bottom: 8px;
+    }
+    #jam-members-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .jam-member {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 13px;
+      color: #f3f4ff;
+    }
+    .jam-member-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .jam-member-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #aeb5ff;
+      border: 1px solid rgba(174, 181, 255, 0.25);
+      border-radius: 999px;
+      padding: 2px 6px;
+    }
   `;
   appendToHeadOrRoot(style);
 
@@ -167,6 +278,10 @@ function injectJamUI() {
       <div class="jam-divider">or join one</div>
       <input class="jam-input" id="jam-code-input" placeholder="Enter 6-digit code" maxlength="6"/>
       <button class="jam-btn outline" id="join-jam-btn">Join Jam</button>
+      <div id="jam-members">
+        <div class="jam-members-title">Listeners In This Jam</div>
+        <div id="jam-members-list"></div>
+      </div>
       <div id="jam-status">Connecting...</div>
     </div>
   `;
@@ -176,6 +291,8 @@ function injectJamUI() {
   const panel = document.getElementById('jam-panel');
   const status = document.getElementById('jam-status');
   const codeDisplay = document.getElementById('jam-code-display');
+  const membersBox = document.getElementById('jam-members');
+  const membersList = document.getElementById('jam-members-list');
 
   hubBtn.addEventListener('click', () => {
     panel.style.display = panel.style.display === 'flex' ? 'none' : 'flex';
@@ -205,6 +322,81 @@ function injectJamUI() {
 
     let roomCode = null;
     let isExternal = false;
+    const localUsername = getYouTubeUsername();
+
+    const renderMembers = (members = []) => {
+      if (!roomCode || members.length === 0) {
+        membersBox.style.display = 'none';
+        membersList.innerHTML = '';
+        return;
+      }
+
+      membersBox.style.display = 'block';
+      membersList.innerHTML = members.map((member) => {
+        const safeName = String(member.username || 'Guest Listener')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+        const badge = safeName === localUsername ? '<span class="jam-member-badge">You</span>' : '';
+        return `<div class="jam-member"><span class="jam-member-name">${safeName}</span>${badge}</div>`;
+      }).join('');
+    };
+
+    const emitRoomState = (pausedOverride = null) => {
+      if (!roomCode) {
+        return;
+      }
+
+      const video = document.querySelector('video');
+      const track = getCurrentTrackInfo();
+      socket.emit('sync_state', {
+        roomCode,
+        url: track.url,
+        trackId: track.trackId,
+        time: video ? video.currentTime : 0,
+        paused: pausedOverride !== null ? pausedOverride : (video ? video.paused : true),
+      });
+      log(`Shared room state for ${track.trackId || 'unknown track'}`);
+    };
+
+    const applyRemoteState = async (state, forcePlay) => {
+      if (!state || !state.url) {
+        return;
+      }
+
+      isExternal = true;
+
+      try {
+        const currentTrack = getCurrentTrackInfo();
+        const needsNavigation = currentTrack.url !== state.url && currentTrack.trackId !== state.trackId;
+
+        if (needsNavigation) {
+          log(`Navigating to synced track ${state.trackId || state.url}`);
+          window.location.href = state.url;
+        }
+
+        const video = await waitForVideo();
+        if (!video) {
+          log('Timed out waiting for video element while applying remote state.');
+          return;
+        }
+
+        if (Math.abs(video.currentTime - state.time) > 1.5) {
+          video.currentTime = state.time;
+        }
+
+        if (forcePlay || !state.paused) {
+          await video.play().catch(() => {});
+        } else {
+          video.pause();
+        }
+      } finally {
+        setTimeout(() => {
+          isExternal = false;
+        }, 800);
+      }
+    };
 
     socket.on('connect', () => {
       status.textContent = 'Connected';
@@ -226,12 +418,13 @@ function injectJamUI() {
 
     document.getElementById('start-jam-btn').addEventListener('click', () => {
       roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      socket.emit('join_room', roomCode);
+      socket.emit('join_room', { roomCode, username: localUsername });
       codeDisplay.textContent = roomCode;
       codeDisplay.style.display = 'block';
       status.textContent = 'You are the DJ. Share the code.';
       status.style.color = '#ffffff';
-      log('Started jam room: ' + roomCode);
+      log(`Started jam room: ${roomCode} as ${localUsername}`);
+      emitRoomState();
     });
 
     document.getElementById('join-jam-btn').addEventListener('click', () => {
@@ -241,42 +434,48 @@ function injectJamUI() {
       }
 
       roomCode = code;
-      socket.emit('join_room', roomCode);
+      socket.emit('join_room', { roomCode, username: localUsername });
       codeDisplay.textContent = roomCode;
       codeDisplay.style.display = 'block';
       status.textContent = 'Joined room ' + roomCode;
       status.style.color = '#ffffff';
-      log('Joined jam room: ' + roomCode);
+      log(`Joined jam room: ${roomCode} as ${localUsername}`);
     });
 
-    socket.on('force_play', (time) => {
-      const video = document.querySelector('video');
-      if (!video) {
+    socket.on('room_members', (payload) => {
+      if (!payload || payload.roomCode !== roomCode) {
         return;
       }
 
-      isExternal = true;
-      if (Math.abs(video.currentTime - time) > 1.5) {
-        video.currentTime = time;
-      }
-      video.play();
-      setTimeout(() => {
-        isExternal = false;
-      }, 600);
+      renderMembers(payload.members || []);
+      log(`Room members updated: ${(payload.members || []).map((member) => member.username).join(', ')}`);
     });
 
-    socket.on('force_pause', (time) => {
-      const video = document.querySelector('video');
-      if (!video) {
+    socket.on('room_state', (state) => {
+      if (!roomCode || state.roomCode !== roomCode) {
         return;
       }
 
-      isExternal = true;
-      video.currentTime = time;
-      video.pause();
-      setTimeout(() => {
-        isExternal = false;
-      }, 600);
+      log(`Received room state for ${state.trackId || 'unknown track'}`);
+      applyRemoteState(state, !state.paused);
+    });
+
+    socket.on('force_play', (state) => {
+      if (!roomCode || state.roomCode !== roomCode) {
+        return;
+      }
+
+      log(`Received force_play for ${state.trackId || 'unknown track'}`);
+      applyRemoteState(state, true);
+    });
+
+    socket.on('force_pause', (state) => {
+      if (!roomCode || state.roomCode !== roomCode) {
+        return;
+      }
+
+      log(`Received force_pause for ${state.trackId || 'unknown track'}`);
+      applyRemoteState(state, false);
     });
 
     window.setInterval(() => {
@@ -288,16 +487,40 @@ function injectJamUI() {
       video._jamHooked = true;
       video.addEventListener('play', () => {
         if (!isExternal && roomCode) {
-          socket.emit('play_music', { roomCode, time: video.currentTime });
+          const track = getCurrentTrackInfo();
+          socket.emit('play_music', {
+            roomCode,
+            time: video.currentTime,
+            url: track.url,
+            trackId: track.trackId,
+          });
         }
       });
       video.addEventListener('pause', () => {
         if (!isExternal && roomCode) {
-          socket.emit('pause_music', { roomCode, time: video.currentTime });
+          const track = getCurrentTrackInfo();
+          socket.emit('pause_music', {
+            roomCode,
+            time: video.currentTime,
+            url: track.url,
+            trackId: track.trackId,
+          });
         }
       });
       log('Video player hooked for sync events.');
     }, 1500);
+
+    syncPoll = window.setInterval(() => {
+      if (!roomCode || isExternal) {
+        return;
+      }
+
+      const nextFingerprint = fingerprintTrack();
+      if (nextFingerprint !== lastTrackFingerprint) {
+        lastTrackFingerprint = nextFingerprint;
+        emitRoomState();
+      }
+    }, 1200);
   };
 
   socketScript.onerror = () => {
