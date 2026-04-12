@@ -11,7 +11,8 @@
                   "appId":  "com.ytmjam.app",
                   "productName":  "YouTube Music Jam",
                   "win":  {
-                              "target":  "portable"
+                              "target":  "portable",
+                              "icon":  "build/78a85b49-a99d-4c3e-8b8d-d8fcfdeb5559.ico"
                           },
                   "nsis":  {
                                "oneClick":  false,
