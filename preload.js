@@ -247,11 +247,98 @@ function injectJamUI() {
       padding: 10px;
       display: none;
     }
+    #jam-room-mode {
+      display: none;
+      align-self: center;
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-weight: 700;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.05);
+      color: #c9cde8;
+    }
+    #jam-room-mode.locked {
+      color: #ffd6d6;
+      background: rgba(240, 71, 71, 0.16);
+      border-color: rgba(240, 71, 71, 0.35);
+    }
+    #jam-room-mode.unlocked {
+      color: #d9ffe8;
+      background: rgba(67, 181, 129, 0.16);
+      border-color: rgba(67, 181, 129, 0.35);
+    }
     #jam-status {
       font-size: 12px;
       color: #666;
       text-align: center;
       min-height: 16px;
+    }
+    .jam-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .jam-toggle-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .jam-toggle-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #f3f4ff;
+    }
+    .jam-toggle-subtitle {
+      font-size: 11px;
+      color: #8f95b2;
+    }
+    .jam-toggle-switch {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      flex-shrink: 0;
+    }
+    .jam-toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .jam-toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 999px;
+      transition: 0.2s ease;
+      cursor: pointer;
+    }
+    .jam-toggle-slider::before {
+      content: "";
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      left: 3px;
+      top: 3px;
+      border-radius: 50%;
+      background: #fff;
+      transition: 0.2s ease;
+    }
+    .jam-toggle-switch input:checked + .jam-toggle-slider {
+      background: #5865f2;
+    }
+    .jam-toggle-switch input:checked + .jam-toggle-slider::before {
+      transform: translateX(20px);
+    }
+    .jam-toggle-switch input:disabled + .jam-toggle-slider {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     #jam-members {
       background: rgba(255, 255, 255, 0.04);
@@ -308,8 +395,19 @@ function injectJamUI() {
     <div id="jam-panel">
       <div class="jam-title">Jam Session</div>
       <input class="jam-input compact" id="jam-name-input" placeholder="Your display name" maxlength="32"/>
+      <div class="jam-toggle-row">
+        <div class="jam-toggle-copy">
+          <div class="jam-toggle-title">Host Lock</div>
+          <div class="jam-toggle-subtitle" id="jam-lock-label">Unlocked: everyone can change tracks</div>
+        </div>
+        <label class="jam-toggle-switch">
+          <input type="checkbox" id="jam-lock-toggle"/>
+          <span class="jam-toggle-slider"></span>
+        </label>
+      </div>
       <button class="jam-btn" id="start-jam-btn">Start a New Jam</button>
       <div id="jam-code-display"></div>
+      <div id="jam-room-mode" class="unlocked">Room Unlocked</div>
       <div class="jam-divider">or join one</div>
       <input class="jam-input" id="jam-code-input" placeholder="Enter 6-digit code" maxlength="6"/>
       <button class="jam-btn outline" id="join-jam-btn">Join Jam</button>
@@ -326,7 +424,10 @@ function injectJamUI() {
   const panel = document.getElementById('jam-panel');
   const status = document.getElementById('jam-status');
   const codeDisplay = document.getElementById('jam-code-display');
+  const roomMode = document.getElementById('jam-room-mode');
   const nameInput = document.getElementById('jam-name-input');
+  const lockToggle = document.getElementById('jam-lock-toggle');
+  const lockLabel = document.getElementById('jam-lock-label');
   const membersBox = document.getElementById('jam-members');
   const membersList = document.getElementById('jam-members-list');
 
@@ -362,6 +463,9 @@ function injectJamUI() {
     let seekDebounceTimer = null;
     let autoJoinAttempted = false;
     let localMemberSocketId = null;
+    let localIsHost = Boolean(storedSession.isHost);
+    let lastRoomState = null;
+    let roomLocked = false;
 
     const getLocalUsername = () => {
       const manual = nameInput.value.trim();
@@ -374,6 +478,17 @@ function injectJamUI() {
     };
 
     nameInput.value = storedSession.username || '';
+
+    const updateLockUi = () => {
+      lockToggle.checked = roomLocked;
+      lockToggle.disabled = !localIsHost;
+      lockLabel.textContent = roomLocked
+        ? 'Locked: only host can change tracks'
+        : 'Unlocked: everyone can change tracks';
+      roomMode.style.display = roomCode ? 'inline-flex' : 'none';
+      roomMode.className = roomLocked ? 'locked' : 'unlocked';
+      roomMode.textContent = roomLocked ? 'Room Locked' : 'Room Unlocked';
+    };
 
     const renderMembers = (members = []) => {
       if (!roomCode || members.length === 0) {
@@ -392,6 +507,7 @@ function injectJamUI() {
         const isYou = member.socketId && member.socketId === localMemberSocketId;
         const badges = [
           member.isHost ? '<span class="jam-member-badge">Host</span>' : '',
+          !member.isHost ? '<span class="jam-member-badge">Listener</span>' : '',
           isYou ? '<span class="jam-member-badge">You</span>' : '',
         ].join('');
         return `<div class="jam-member"><span class="jam-member-name">${safeName}</span>${badges}</div>`;
@@ -401,8 +517,10 @@ function injectJamUI() {
     const joinRoom = (nextRoomCode, isHost = false) => {
       const username = getLocalUsername();
       roomCode = nextRoomCode;
+      localIsHost = isHost;
       saveJamSession({ roomCode, username, isHost });
       socket.emit('join_room', { roomCode, username, isHost });
+      socket.emit('request_room_state', roomCode);
       codeDisplay.textContent = roomCode;
       codeDisplay.style.display = 'block';
       log(`Joined jam room: ${roomCode} as ${username}`);
@@ -482,6 +600,7 @@ function injectJamUI() {
         } else {
           video.pause();
         }
+        lastRoomState = state;
       } finally {
         setTimeout(() => {
           isExternal = false;
@@ -548,14 +667,30 @@ function injectJamUI() {
         .filter((name) => name && name !== 'Guest Listener');
       if (detectedNames.length > 0) {
         const exactLocal = payload.members.find((member) => member.socketId === localMemberSocketId);
-        if (exactLocal && exactLocal.username && exactLocal.username !== 'Guest Listener') {
-          saveJamSession({ roomCode, username: exactLocal.username, isHost: Boolean(exactLocal.isHost) });
-          nameInput.value = exactLocal.username;
+        if (exactLocal) {
+          localIsHost = Boolean(exactLocal.isHost);
+          if (exactLocal.username && exactLocal.username !== 'Guest Listener') {
+            saveJamSession({ roomCode, username: exactLocal.username, isHost: localIsHost });
+            nameInput.value = exactLocal.username;
+          } else {
+            saveJamSession({ roomCode, username: getLocalUsername(), isHost: localIsHost });
+          }
         }
       }
 
+      updateLockUi();
       renderMembers(payload.members || []);
       log(`Room members updated: ${(payload.members || []).map((member) => member.username).join(', ')}`);
+    });
+
+    socket.on('room_settings', (settings) => {
+      if (!settings || settings.roomCode !== roomCode) {
+        return;
+      }
+
+      roomLocked = Boolean(settings.locked);
+      updateLockUi();
+      log(`Room lock state updated: ${roomLocked ? 'locked' : 'unlocked'}`);
     });
 
     socket.on('room_state', (state) => {
@@ -563,8 +698,19 @@ function injectJamUI() {
         return;
       }
 
+      lastRoomState = state;
       log(`Received room state for ${state.trackId || 'unknown track'}`);
       applyRemoteState(state, !state.paused);
+    });
+
+    socket.on('state_requested', (payload) => {
+      if (!payload || payload.roomCode !== roomCode || isExternal) {
+        return;
+      }
+
+      setTimeout(() => {
+        emitRoomState();
+      }, 400);
     });
 
     socket.on('force_play', (state) => {
@@ -633,9 +779,54 @@ function injectJamUI() {
       const nextFingerprint = fingerprintTrack();
       if (nextFingerprint !== lastTrackFingerprint) {
         lastTrackFingerprint = nextFingerprint;
-        emitRoomState();
+        if (localIsHost) {
+          emitRoomState();
+        } else {
+          if (roomLocked) {
+            log('Guest changed track locally while room is locked; requesting host room state.');
+            socket.emit('request_room_state', roomCode);
+          } else {
+            emitRoomState();
+          }
+        }
       }
     }, 1200);
+
+    window.addEventListener('yt-navigate-finish', () => {
+      if (!roomCode || isExternal) {
+        return;
+      }
+
+      setTimeout(() => {
+        if (localIsHost) {
+          emitRoomState();
+        } else {
+          const currentTrack = getCurrentTrackInfo();
+          if (roomLocked) {
+            if (lastRoomState && lastRoomState.trackId && currentTrack.trackId !== lastRoomState.trackId) {
+              log('Guest navigation differs from host track; requesting authoritative room state.');
+            }
+            socket.emit('request_room_state', roomCode);
+          } else {
+            emitRoomState();
+          }
+        }
+      }, 1200);
+    });
+
+    lockToggle.addEventListener('change', () => {
+      if (!roomCode || !localIsHost) {
+        updateLockUi();
+        return;
+      }
+
+      roomLocked = lockToggle.checked;
+      socket.emit('set_room_lock', {
+        roomCode,
+        locked: roomLocked,
+      });
+      updateLockUi();
+    });
 
     if (roomCode) {
       codeDisplay.textContent = roomCode;
@@ -643,6 +834,8 @@ function injectJamUI() {
       status.textContent = 'Saved room ' + roomCode;
       status.style.color = '#ffffff';
     }
+
+    updateLockUi();
   };
 
   socketScript.onerror = () => {
