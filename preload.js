@@ -236,6 +236,14 @@ function injectJamUI() {
     .jam-btn.outline:hover {
       background: rgba(255, 255, 255, 0.07);
     }
+    .jam-btn.secondary {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #f2f3ff;
+    }
+    .jam-btn.secondary:hover {
+      background: rgba(255, 255, 255, 0.14);
+    }
     #jam-code-display {
       text-align: center;
       font-size: 28px;
@@ -411,6 +419,7 @@ function injectJamUI() {
       <div class="jam-divider">or join one</div>
       <input class="jam-input" id="jam-code-input" placeholder="Enter 6-digit code" maxlength="6"/>
       <button class="jam-btn outline" id="join-jam-btn">Join Jam</button>
+      <button class="jam-btn secondary" id="sync-host-btn">Sync With Host</button>
       <div id="jam-members">
         <div class="jam-members-title">Listeners In This Jam</div>
         <div id="jam-members-list"></div>
@@ -428,6 +437,7 @@ function injectJamUI() {
   const nameInput = document.getElementById('jam-name-input');
   const lockToggle = document.getElementById('jam-lock-toggle');
   const lockLabel = document.getElementById('jam-lock-label');
+  const syncHostBtn = document.getElementById('sync-host-btn');
   const membersBox = document.getElementById('jam-members');
   const membersList = document.getElementById('jam-members-list');
 
@@ -466,6 +476,7 @@ function injectJamUI() {
     let localIsHost = Boolean(storedSession.isHost);
     let lastRoomState = null;
     let roomLocked = false;
+    let pendingForcedTrackId = null;
 
     const getLocalUsername = () => {
       const manual = nameInput.value.trim();
@@ -488,6 +499,8 @@ function injectJamUI() {
       roomMode.style.display = roomCode ? 'inline-flex' : 'none';
       roomMode.className = roomLocked ? 'locked' : 'unlocked';
       roomMode.textContent = roomLocked ? 'Room Locked' : 'Room Unlocked';
+      syncHostBtn.style.display = roomCode ? 'block' : 'none';
+      syncHostBtn.textContent = localIsHost ? 'Broadcast Host State' : 'Sync With Host';
     };
 
     const renderMembers = (members = []) => {
@@ -564,6 +577,15 @@ function injectJamUI() {
       log(`Shared seek position ${video.currentTime.toFixed(2)}s for ${track.trackId || 'unknown track'}`);
     };
 
+    const requestAuthoritativeState = (reason) => {
+      if (!roomCode) {
+        return;
+      }
+
+      log(`Requesting room state: ${reason}`);
+      socket.emit('request_room_state', roomCode);
+    };
+
     const applyRemoteState = async (state, forcePlay) => {
       if (!state || !state.url) {
         return;
@@ -580,10 +602,13 @@ function injectJamUI() {
 
         if (needsNavigation) {
           log(`Navigating to synced track ${state.trackId || state.url}`);
+          pendingForcedTrackId = state.trackId || state.url;
           saveJamSession({ roomCode, username: getLocalUsername() });
-          window.location.href = state.url;
+          window.location.assign(state.url);
           return;
         }
+
+        pendingForcedTrackId = null;
 
         const video = await waitForVideo();
         if (!video) {
@@ -783,8 +808,7 @@ function injectJamUI() {
           emitRoomState();
         } else {
           if (roomLocked) {
-            log('Guest changed track locally while room is locked; requesting host room state.');
-            socket.emit('request_room_state', roomCode);
+            requestAuthoritativeState('guest changed track while room locked');
           } else {
             emitRoomState();
           }
@@ -806,13 +830,29 @@ function injectJamUI() {
             if (lastRoomState && lastRoomState.trackId && currentTrack.trackId !== lastRoomState.trackId) {
               log('Guest navigation differs from host track; requesting authoritative room state.');
             }
-            socket.emit('request_room_state', roomCode);
+            requestAuthoritativeState('guest navigation finished while room locked');
           } else {
             emitRoomState();
           }
         }
       }, 1200);
     });
+
+    window.setInterval(() => {
+      if (!roomCode || localIsHost || !roomLocked || isExternal) {
+        return;
+      }
+
+      const currentTrack = getCurrentTrackInfo();
+      if (pendingForcedTrackId && currentTrack.trackId !== pendingForcedTrackId) {
+        requestAuthoritativeState('pending forced track not reached yet');
+        return;
+      }
+
+      if (lastRoomState && lastRoomState.trackId && currentTrack.trackId !== lastRoomState.trackId) {
+        requestAuthoritativeState('periodic locked-room drift check');
+      }
+    }, 3500);
 
     lockToggle.addEventListener('change', () => {
       if (!roomCode || !localIsHost) {
@@ -826,6 +866,25 @@ function injectJamUI() {
         locked: roomLocked,
       });
       updateLockUi();
+    });
+
+    syncHostBtn.addEventListener('click', () => {
+      if (!roomCode) {
+        status.textContent = 'Join a room first';
+        status.style.color = '#f04747';
+        return;
+      }
+
+      if (localIsHost) {
+        status.textContent = 'Broadcasting your current state...';
+        status.style.color = '#ffffff';
+        emitRoomState();
+        return;
+      }
+
+      status.textContent = 'Syncing with host...';
+      status.style.color = '#ffffff';
+      requestAuthoritativeState('manual sync button');
     });
 
     if (roomCode) {
