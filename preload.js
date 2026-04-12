@@ -2,10 +2,12 @@ const { ipcRenderer } = require('electron');
 
 const SOCKET_IO_CDN = 'https://cdn.socket.io/4.7.4/socket.io.min.js';
 const SOCKET_SERVER_URL = 'https://ytm-jam-server-production.up.railway.app';
+const JAM_STORAGE_KEY = 'ytm-jam-session';
 
 let uiInjected = false;
 let socketScriptRequested = false;
 let lastTrackFingerprint = '';
+let isApplyingRemoteState = false;
 
 function log(message) {
   try {
@@ -23,6 +25,26 @@ function appendToHeadOrRoot(node) {
   const parent = document.head || document.documentElement;
   if (parent) {
     parent.appendChild(node);
+  }
+}
+
+function loadJamSession() {
+  try {
+    const raw = window.sessionStorage.getItem(JAM_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : { roomCode: null, username: null };
+  } catch (_) {
+    return { roomCode: null, username: null };
+  }
+}
+
+function saveJamSession(session) {
+  try {
+    window.sessionStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({
+      roomCode: session.roomCode || null,
+      username: session.username || null,
+    }));
+  } catch (_) {
+    // Ignore storage failures.
   }
 }
 
@@ -65,6 +87,8 @@ function waitForVideo(timeoutMs = 15000) {
 
 function getYouTubeUsername() {
   const candidates = [
+    'ytmusic-settings-button tp-yt-paper-tooltip #tooltip',
+    '#right-content ytmusic-settings-button #label',
     '#right-content ytmusic-settings-button tp-yt-paper-icon-button[aria-label]',
     'tp-yt-paper-icon-button[aria-label*="Account"]',
     'button[aria-label*="Google Account"]',
@@ -320,9 +344,17 @@ function injectJamUI() {
       transports: ['websocket', 'polling'],
     });
 
-    let roomCode = null;
+    const storedSession = loadJamSession();
+    let roomCode = storedSession.roomCode || null;
     let isExternal = false;
-    const localUsername = getYouTubeUsername();
+    let seekDebounceTimer = null;
+    let autoJoinAttempted = false;
+
+    const getLocalUsername = () => {
+      const detected = getYouTubeUsername();
+      const stored = loadJamSession().username;
+      return detected !== 'Guest Listener' ? detected : (stored || 'Guest Listener');
+    };
 
     const renderMembers = (members = []) => {
       if (!roomCode || members.length === 0) {
@@ -338,9 +370,19 @@ function injectJamUI() {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;');
-        const badge = safeName === localUsername ? '<span class="jam-member-badge">You</span>' : '';
+        const badge = safeName === getLocalUsername() ? '<span class="jam-member-badge">You</span>' : '';
         return `<div class="jam-member"><span class="jam-member-name">${safeName}</span>${badge}</div>`;
       }).join('');
+    };
+
+    const joinRoom = (nextRoomCode) => {
+      const username = getLocalUsername();
+      roomCode = nextRoomCode;
+      saveJamSession({ roomCode, username });
+      socket.emit('join_room', { roomCode, username });
+      codeDisplay.textContent = roomCode;
+      codeDisplay.style.display = 'block';
+      log(`Joined jam room: ${roomCode} as ${username}`);
     };
 
     const emitRoomState = (pausedOverride = null) => {
@@ -360,20 +402,46 @@ function injectJamUI() {
       log(`Shared room state for ${track.trackId || 'unknown track'}`);
     };
 
+    const emitSeekState = () => {
+      if (!roomCode) {
+        return;
+      }
+
+      const video = document.querySelector('video');
+      if (!video) {
+        return;
+      }
+
+      const track = getCurrentTrackInfo();
+      socket.emit('seek_music', {
+        roomCode,
+        time: video.currentTime,
+        url: track.url,
+        trackId: track.trackId,
+        paused: video.paused,
+      });
+      log(`Shared seek position ${video.currentTime.toFixed(2)}s for ${track.trackId || 'unknown track'}`);
+    };
+
     const applyRemoteState = async (state, forcePlay) => {
       if (!state || !state.url) {
         return;
       }
 
       isExternal = true;
+      isApplyingRemoteState = true;
 
       try {
         const currentTrack = getCurrentTrackInfo();
-        const needsNavigation = currentTrack.url !== state.url && currentTrack.trackId !== state.trackId;
+        const needsNavigation = state.trackId
+          ? currentTrack.trackId !== state.trackId
+          : currentTrack.url !== state.url;
 
         if (needsNavigation) {
           log(`Navigating to synced track ${state.trackId || state.url}`);
+          saveJamSession({ roomCode, username: getLocalUsername() });
           window.location.href = state.url;
+          return;
         }
 
         const video = await waitForVideo();
@@ -394,6 +462,7 @@ function injectJamUI() {
       } finally {
         setTimeout(() => {
           isExternal = false;
+          isApplyingRemoteState = false;
         }, 800);
       }
     };
@@ -402,6 +471,13 @@ function injectJamUI() {
       status.textContent = 'Connected';
       status.style.color = '#43b581';
       log('Connected to jam server.');
+
+      if (roomCode && !autoJoinAttempted) {
+        autoJoinAttempted = true;
+        joinRoom(roomCode);
+        status.textContent = 'Rejoined room ' + roomCode;
+        status.style.color = '#ffffff';
+      }
     });
 
     socket.on('disconnect', (reason) => {
@@ -418,12 +494,11 @@ function injectJamUI() {
 
     document.getElementById('start-jam-btn').addEventListener('click', () => {
       roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      socket.emit('join_room', { roomCode, username: localUsername });
-      codeDisplay.textContent = roomCode;
-      codeDisplay.style.display = 'block';
+      autoJoinAttempted = true;
+      joinRoom(roomCode);
       status.textContent = 'You are the DJ. Share the code.';
       status.style.color = '#ffffff';
-      log(`Started jam room: ${roomCode} as ${localUsername}`);
+      log(`Started jam room: ${roomCode}`);
       emitRoomState();
     });
 
@@ -433,13 +508,10 @@ function injectJamUI() {
         return;
       }
 
-      roomCode = code;
-      socket.emit('join_room', { roomCode, username: localUsername });
-      codeDisplay.textContent = roomCode;
-      codeDisplay.style.display = 'block';
+      autoJoinAttempted = true;
+      joinRoom(code);
       status.textContent = 'Joined room ' + roomCode;
       status.style.color = '#ffffff';
-      log(`Joined jam room: ${roomCode} as ${localUsername}`);
     });
 
     socket.on('room_members', (payload) => {
@@ -507,10 +579,18 @@ function injectJamUI() {
           });
         }
       });
+      video.addEventListener('seeked', () => {
+        if (!isExternal && roomCode && !isApplyingRemoteState) {
+          clearTimeout(seekDebounceTimer);
+          seekDebounceTimer = setTimeout(() => {
+            emitSeekState();
+          }, 150);
+        }
+      });
       log('Video player hooked for sync events.');
     }, 1500);
 
-    syncPoll = window.setInterval(() => {
+    window.setInterval(() => {
       if (!roomCode || isExternal) {
         return;
       }
@@ -521,6 +601,13 @@ function injectJamUI() {
         emitRoomState();
       }
     }, 1200);
+
+    if (roomCode) {
+      codeDisplay.textContent = roomCode;
+      codeDisplay.style.display = 'block';
+      status.textContent = 'Saved room ' + roomCode;
+      status.style.color = '#ffffff';
+    }
   };
 
   socketScript.onerror = () => {
