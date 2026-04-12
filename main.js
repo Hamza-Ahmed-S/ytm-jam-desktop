@@ -74,8 +74,10 @@ function installCspBypass() {
 
 function createWindow() {
   const preloadPath = resolvePreloadPath();
+  const iconPath = path.join(__dirname, 'build', 'icon.ico');
   log(`Using preload path: ${preloadPath}`);
   log(`Preload exists: ${fs.existsSync(preloadPath)}`);
+  log(`Icon exists: ${fs.existsSync(iconPath)}`);
 
   const win = new BrowserWindow({
     width: 1280,
@@ -85,6 +87,7 @@ function createWindow() {
     title: 'YouTube Music Jam',
     autoHideMenuBar: true,
     show: false,
+    icon: iconPath,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: false,

@@ -42,6 +42,7 @@ function saveJamSession(session) {
     window.sessionStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({
       roomCode: session.roomCode || null,
       username: session.username || null,
+      isHost: Boolean(session.isHost),
     }));
   } catch (_) {
     // Ignore storage failures.
@@ -90,6 +91,8 @@ function getYouTubeUsername() {
     'ytmusic-settings-button tp-yt-paper-tooltip #tooltip',
     '#right-content ytmusic-settings-button #label',
     '#right-content ytmusic-settings-button tp-yt-paper-icon-button[aria-label]',
+    'ytmusic-settings-button tp-yt-paper-icon-button[aria-label]',
+    'ytmusic-settings-button button[aria-label]',
     'tp-yt-paper-icon-button[aria-label*="Account"]',
     'button[aria-label*="Google Account"]',
     'button[aria-label*="account"]',
@@ -107,6 +110,8 @@ function getYouTubeUsername() {
     const cleaned = raw
       .replace(/^Google Account:\s*/i, '')
       .replace(/^Account:\s*/i, '')
+      .replace(/^Switch account\s*/i, '')
+      .replace(/^Open account menu for\s*/i, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -204,6 +209,11 @@ function injectJamUI() {
       text-transform: none;
       color: #555;
     }
+    .jam-input.compact {
+      letter-spacing: 0;
+      text-transform: none;
+      margin-bottom: 0;
+    }
     .jam-btn {
       background: #5865f2;
       color: #fff;
@@ -297,6 +307,7 @@ function injectJamUI() {
     </button>
     <div id="jam-panel">
       <div class="jam-title">Jam Session</div>
+      <input class="jam-input compact" id="jam-name-input" placeholder="Your display name" maxlength="32"/>
       <button class="jam-btn" id="start-jam-btn">Start a New Jam</button>
       <div id="jam-code-display"></div>
       <div class="jam-divider">or join one</div>
@@ -315,6 +326,7 @@ function injectJamUI() {
   const panel = document.getElementById('jam-panel');
   const status = document.getElementById('jam-status');
   const codeDisplay = document.getElementById('jam-code-display');
+  const nameInput = document.getElementById('jam-name-input');
   const membersBox = document.getElementById('jam-members');
   const membersList = document.getElementById('jam-members-list');
 
@@ -349,12 +361,19 @@ function injectJamUI() {
     let isExternal = false;
     let seekDebounceTimer = null;
     let autoJoinAttempted = false;
+    let localMemberSocketId = null;
 
     const getLocalUsername = () => {
+      const manual = nameInput.value.trim();
+      if (manual) {
+        return manual;
+      }
       const detected = getYouTubeUsername();
       const stored = loadJamSession().username;
       return detected !== 'Guest Listener' ? detected : (stored || 'Guest Listener');
     };
+
+    nameInput.value = storedSession.username || '';
 
     const renderMembers = (members = []) => {
       if (!roomCode || members.length === 0) {
@@ -370,16 +389,20 @@ function injectJamUI() {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;');
-        const badge = safeName === getLocalUsername() ? '<span class="jam-member-badge">You</span>' : '';
-        return `<div class="jam-member"><span class="jam-member-name">${safeName}</span>${badge}</div>`;
+        const isYou = member.socketId && member.socketId === localMemberSocketId;
+        const badges = [
+          member.isHost ? '<span class="jam-member-badge">Host</span>' : '',
+          isYou ? '<span class="jam-member-badge">You</span>' : '',
+        ].join('');
+        return `<div class="jam-member"><span class="jam-member-name">${safeName}</span>${badges}</div>`;
       }).join('');
     };
 
-    const joinRoom = (nextRoomCode) => {
+    const joinRoom = (nextRoomCode, isHost = false) => {
       const username = getLocalUsername();
       roomCode = nextRoomCode;
-      saveJamSession({ roomCode, username });
-      socket.emit('join_room', { roomCode, username });
+      saveJamSession({ roomCode, username, isHost });
+      socket.emit('join_room', { roomCode, username, isHost });
       codeDisplay.textContent = roomCode;
       codeDisplay.style.display = 'block';
       log(`Joined jam room: ${roomCode} as ${username}`);
@@ -468,13 +491,14 @@ function injectJamUI() {
     };
 
     socket.on('connect', () => {
+      localMemberSocketId = socket.id;
       status.textContent = 'Connected';
       status.style.color = '#43b581';
       log('Connected to jam server.');
 
       if (roomCode && !autoJoinAttempted) {
         autoJoinAttempted = true;
-        joinRoom(roomCode);
+        joinRoom(roomCode, Boolean(storedSession.isHost));
         status.textContent = 'Rejoined room ' + roomCode;
         status.style.color = '#ffffff';
       }
@@ -495,7 +519,7 @@ function injectJamUI() {
     document.getElementById('start-jam-btn').addEventListener('click', () => {
       roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
       autoJoinAttempted = true;
-      joinRoom(roomCode);
+      joinRoom(roomCode, true);
       status.textContent = 'You are the DJ. Share the code.';
       status.style.color = '#ffffff';
       log(`Started jam room: ${roomCode}`);
@@ -509,7 +533,7 @@ function injectJamUI() {
       }
 
       autoJoinAttempted = true;
-      joinRoom(code);
+      joinRoom(code, false);
       status.textContent = 'Joined room ' + roomCode;
       status.style.color = '#ffffff';
     });
@@ -517,6 +541,17 @@ function injectJamUI() {
     socket.on('room_members', (payload) => {
       if (!payload || payload.roomCode !== roomCode) {
         return;
+      }
+
+      const detectedNames = (payload.members || [])
+        .map((member) => member.username)
+        .filter((name) => name && name !== 'Guest Listener');
+      if (detectedNames.length > 0) {
+        const exactLocal = payload.members.find((member) => member.socketId === localMemberSocketId);
+        if (exactLocal && exactLocal.username && exactLocal.username !== 'Guest Listener') {
+          saveJamSession({ roomCode, username: exactLocal.username, isHost: Boolean(exactLocal.isHost) });
+          nameInput.value = exactLocal.username;
+        }
       }
 
       renderMembers(payload.members || []);

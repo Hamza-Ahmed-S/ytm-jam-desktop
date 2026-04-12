@@ -10,9 +10,10 @@
     "build":  {
                   "appId":  "com.ytmjam.app",
                   "productName":  "YouTube Music Jam",
+                  "artifactName":  "${productName}.${ext}",
                   "win":  {
                               "target":  "portable",
-                              "icon":  "build/78a85b49-a99d-4c3e-8b8d-d8fcfdeb5559.ico"
+                              "icon":  "build/icon.ico"
                           },
                   "nsis":  {
                                "oneClick":  false,
@@ -22,7 +23,8 @@
                                 "main.js",
                                 "preload.js",
                                 "jam-inject.js",
-                                "package.json"
+                                "package.json",
+                                "build/icon.ico"
                             ]
               },
     "devDependencies":  {
