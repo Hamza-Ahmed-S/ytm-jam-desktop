@@ -9,6 +9,10 @@ let socketScriptRequested = false;
 let lastTrackFingerprint = '';
 let isApplyingRemoteState = false;
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function log(message) {
   try {
     ipcRenderer.send('log', message);
@@ -61,6 +65,19 @@ function getCurrentTrackInfo() {
 function fingerprintTrack() {
   const track = getCurrentTrackInfo();
   return `${track.trackId || 'no-track'}|${track.url}`;
+}
+
+function matchesTrackState(state) {
+  if (!state || !state.url) {
+    return false;
+  }
+
+  const currentTrack = getCurrentTrackInfo();
+  if (state.trackId) {
+    return currentTrack.trackId === state.trackId;
+  }
+
+  return currentTrack.url === state.url;
 }
 
 function waitForVideo(timeoutMs = 15000) {
@@ -477,6 +494,8 @@ function injectJamUI() {
     let lastRoomState = null;
     let roomLocked = false;
     let pendingForcedTrackId = null;
+    let pendingRemoteSync = null;
+    let remoteApplyToken = 0;
 
     const getLocalUsername = () => {
       const manual = nameInput.value.trim();
@@ -533,7 +552,11 @@ function injectJamUI() {
       localIsHost = isHost;
       saveJamSession({ roomCode, username, isHost });
       socket.emit('join_room', { roomCode, username, isHost });
-      socket.emit('request_room_state', roomCode);
+      socket.emit('request_room_state', {
+        roomCode,
+        hostOnly: true,
+        reason: 'join room bootstrap',
+      });
       codeDisplay.textContent = roomCode;
       codeDisplay.style.display = 'block';
       log(`Joined jam room: ${roomCode} as ${username}`);
@@ -583,54 +606,132 @@ function injectJamUI() {
       }
 
       log(`Requesting room state: ${reason}`);
-      socket.emit('request_room_state', roomCode);
+      socket.emit('request_room_state', {
+        roomCode,
+        hostOnly: true,
+        reason,
+      });
     };
 
-    const applyRemoteState = async (state, forcePlay) => {
-      if (!state || !state.url) {
+    const broadcastRoomStateBurst = (reason, pausedOverride = null) => {
+      if (!roomCode) {
         return;
       }
+
+      log(`Broadcasting room state burst: ${reason}`);
+      emitRoomState(pausedOverride);
+      setTimeout(() => {
+        if (!roomCode || isExternal) {
+          return;
+        }
+        emitRoomState(pausedOverride);
+      }, 900);
+      setTimeout(() => {
+        if (!roomCode || isExternal) {
+          return;
+        }
+        emitRoomState(pausedOverride);
+      }, 2200);
+    };
+
+    const finalizeRemoteState = async (state, forcePlay, reason) => {
+      const applyToken = ++remoteApplyToken;
 
       isExternal = true;
       isApplyingRemoteState = true;
 
       try {
-        const currentTrack = getCurrentTrackInfo();
-        const needsNavigation = state.trackId
-          ? currentTrack.trackId !== state.trackId
-          : currentTrack.url !== state.url;
+        for (let attempt = 1; attempt <= 10; attempt += 1) {
+          if (applyToken !== remoteApplyToken) {
+            return;
+          }
+
+          if (!matchesTrackState(state)) {
+            log(`Waiting for synced track to load (${attempt}/10) for ${state.trackId || state.url}`);
+            await delay(500);
+            continue;
+          }
+
+          const video = await waitForVideo(3000);
+          if (!video) {
+            log(`Video not ready yet while applying synced state (${attempt}/10)`);
+            await delay(500);
+            continue;
+          }
+
+          if (Number.isFinite(state.time) && Math.abs(video.currentTime - state.time) > 1) {
+            video.currentTime = state.time;
+            await delay(250);
+          }
+
+          if (forcePlay || !state.paused) {
+            await video.play().catch(() => {});
+          } else {
+            video.pause();
+          }
+
+          if (Number.isFinite(state.time) && Math.abs(video.currentTime - state.time) > 2) {
+            video.currentTime = state.time;
+          }
+
+          lastRoomState = state;
+          pendingRemoteSync = null;
+          pendingForcedTrackId = null;
+          log(`Applied remote room state (${reason}) for ${state.trackId || state.url}`);
+          return;
+        }
+
+        log(`Failed to fully apply remote room state after retries (${reason}) for ${state.trackId || state.url}`);
+        requestAuthoritativeState(`retry after failed remote apply: ${reason}`);
+      } finally {
+        if (applyToken === remoteApplyToken) {
+          setTimeout(() => {
+            if (applyToken === remoteApplyToken) {
+              isExternal = false;
+              isApplyingRemoteState = false;
+            }
+          }, 1200);
+        }
+      }
+    };
+
+    const applyRemoteState = async (state, forcePlay, reason = 'room_state') => {
+      if (!state || !state.url) {
+        return;
+      }
+
+      if (
+        lastRoomState &&
+        Number.isFinite(lastRoomState.updatedAt) &&
+        Number.isFinite(state.updatedAt) &&
+        state.updatedAt + 250 < lastRoomState.updatedAt
+      ) {
+        log(`Ignoring stale room state for ${state.trackId || state.url}`);
+        return;
+      }
+
+      const needsNavigation = !matchesTrackState(state);
+
+      try {
+        pendingRemoteSync = { state, forcePlay, reason };
 
         if (needsNavigation) {
           log(`Navigating to synced track ${state.trackId || state.url}`);
           pendingForcedTrackId = state.trackId || state.url;
-          saveJamSession({ roomCode, username: getLocalUsername() });
+          isExternal = true;
+          saveJamSession({ roomCode, username: getLocalUsername(), isHost: localIsHost });
           window.location.assign(state.url);
           return;
         }
 
-        pendingForcedTrackId = null;
-
-        const video = await waitForVideo();
-        if (!video) {
-          log('Timed out waiting for video element while applying remote state.');
-          return;
-        }
-
-        if (Math.abs(video.currentTime - state.time) > 1.5) {
-          video.currentTime = state.time;
-        }
-
-        if (forcePlay || !state.paused) {
-          await video.play().catch(() => {});
-        } else {
-          video.pause();
-        }
-        lastRoomState = state;
+        await finalizeRemoteState(state, forcePlay, reason);
       } finally {
-        setTimeout(() => {
-          isExternal = false;
-          isApplyingRemoteState = false;
-        }, 800);
+        if (!needsNavigation && !pendingRemoteSync) {
+          setTimeout(() => {
+            isExternal = false;
+            isApplyingRemoteState = false;
+          }, 800);
+        }
       }
     };
 
@@ -723,19 +824,30 @@ function injectJamUI() {
         return;
       }
 
-      lastRoomState = state;
       log(`Received room state for ${state.trackId || 'unknown track'}`);
-      applyRemoteState(state, !state.paused);
+      applyRemoteState(state, !state.paused, 'room_state event');
     });
 
     socket.on('state_requested', (payload) => {
-      if (!payload || payload.roomCode !== roomCode || isExternal) {
+      if (!payload || payload.roomCode !== roomCode || isExternal || payload.requesterSocketId === socket.id) {
+        return;
+      }
+
+      if (payload.hostOnly && !localIsHost) {
+        return;
+      }
+
+      if (roomLocked && !localIsHost) {
         return;
       }
 
       setTimeout(() => {
-        emitRoomState();
-      }, 400);
+        if (pendingRemoteSync) {
+          log(`Skipping requested state broadcast while remote sync is pending (${payload.reason || 'no reason'})`);
+          return;
+        }
+        broadcastRoomStateBurst(`state requested: ${payload.reason || 'no reason'}`);
+      }, 700);
     });
 
     socket.on('force_play', (state) => {
@@ -744,7 +856,7 @@ function injectJamUI() {
       }
 
       log(`Received force_play for ${state.trackId || 'unknown track'}`);
-      applyRemoteState(state, true);
+      applyRemoteState(state, true, 'force_play');
     });
 
     socket.on('force_pause', (state) => {
@@ -753,7 +865,7 @@ function injectJamUI() {
       }
 
       log(`Received force_pause for ${state.trackId || 'unknown track'}`);
-      applyRemoteState(state, false);
+      applyRemoteState(state, false, 'force_pause');
     });
 
     window.setInterval(() => {
@@ -805,25 +917,37 @@ function injectJamUI() {
       if (nextFingerprint !== lastTrackFingerprint) {
         lastTrackFingerprint = nextFingerprint;
         if (localIsHost) {
-          emitRoomState();
+          broadcastRoomStateBurst('local track fingerprint changed by host');
         } else {
           if (roomLocked) {
             requestAuthoritativeState('guest changed track while room locked');
           } else {
-            emitRoomState();
+            broadcastRoomStateBurst('local track fingerprint changed by listener in unlocked room');
           }
         }
       }
     }, 1200);
 
     window.addEventListener('yt-navigate-finish', () => {
+      if (pendingRemoteSync) {
+        setTimeout(() => {
+          if (pendingRemoteSync) {
+            finalizeRemoteState(
+              pendingRemoteSync.state,
+              pendingRemoteSync.forcePlay,
+              `post-navigation ${pendingRemoteSync.reason}`
+            );
+          }
+        }, 900);
+      }
+
       if (!roomCode || isExternal) {
         return;
       }
 
       setTimeout(() => {
         if (localIsHost) {
-          emitRoomState();
+          broadcastRoomStateBurst('host navigation finished');
         } else {
           const currentTrack = getCurrentTrackInfo();
           if (roomLocked) {
@@ -832,11 +956,25 @@ function injectJamUI() {
             }
             requestAuthoritativeState('guest navigation finished while room locked');
           } else {
-            emitRoomState();
+            broadcastRoomStateBurst('listener navigation finished in unlocked room');
           }
         }
       }, 1200);
     });
+
+    window.setInterval(() => {
+      if (!pendingRemoteSync || isApplyingRemoteState) {
+        return;
+      }
+
+      if (matchesTrackState(pendingRemoteSync.state)) {
+        finalizeRemoteState(
+          pendingRemoteSync.state,
+          pendingRemoteSync.forcePlay,
+          `pending recovery ${pendingRemoteSync.reason}`
+        );
+      }
+    }, 1000);
 
     window.setInterval(() => {
       if (!roomCode || localIsHost || !roomLocked || isExternal) {
@@ -878,7 +1016,7 @@ function injectJamUI() {
       if (localIsHost) {
         status.textContent = 'Broadcasting your current state...';
         status.style.color = '#ffffff';
-        emitRoomState();
+        broadcastRoomStateBurst('manual host rebroadcast');
         return;
       }
 
