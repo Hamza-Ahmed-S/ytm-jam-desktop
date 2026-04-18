@@ -1,130 +1,122 @@
 # YouTube Music Jam
 
-An Electron desktop wrapper for YouTube Music with a real-time **Jam Session** mode, so multiple people can listen together across different PCs.
+An Electron desktop app that wraps **YouTube Music** and adds a real-time **Jam Session** system so friends can listen together across different PCs.
 
-## What It Does
+![Electron](https://img.shields.io/badge/Built%20With-Electron-1f6feb?style=for-the-badge)
+![Socket.io](https://img.shields.io/badge/Realtime-Socket.io-111111?style=for-the-badge)
+![Platform](https://img.shields.io/badge/Platform-Windows-ea4c89?style=for-the-badge)
 
-YouTube Music Jam combines a desktop YouTube Music shell with a Socket.io-powered sync layer that keeps a room aligned on:
+## 🎵 What This Project Is
 
-- track changes
-- play / pause
-- seek position
-- room membership
-- locked vs unlocked room control
+YouTube Music Jam turns YouTube Music into a shared listening app with live room sync.
 
-The app is designed around real-world recovery, not just happy-path playback. Recent work focused on making **track changes behave like hard resync events** and making **manual recovery** more reliable when YouTube Music's SPA routing gets weird.
+With a Jam room, users can:
 
-## Highlights
+- create or join a session with a 6-character room code
+- sync play and pause events in real time
+- sync seek position
+- sync track changes
+- see who is in the room
+- choose whether the room is host-controlled or collaborative
 
-- Electron desktop client for YouTube Music
-- Real-time jam rooms with 6-character room codes
+The goal is simple: make YouTube Music feel like a real desktop watch-party style experience instead of just a browser tab.
+
+## ✨ Main Features
+
+- Real-time Jam rooms
 - Host and listener roles
 - Member list with `Host`, `Listener`, and `You` badges
 - Locked and unlocked room modes
 - Manual display name support
-- Manual sync controls:
-  - `Sync With Host`
-  - `Broadcast Host State`
+- `Sync With Host` button for listeners
+- `Broadcast Host State` button for hosts
 - Auto rejoin after YouTube Music SPA navigation
-- Custom packaged app icon
+- Custom packaged desktop icon
 
-## How Sync Works
+## 🧠 Sync Model
 
-The project uses a split architecture:
+The app uses a split client/server setup:
 
 - `electron-jam/`
-  - Electron client
+  - Electron desktop client
   - injects the Jam UI into the YouTube Music SPA
-  - detects local playback and navigation changes
-  - applies remote room state with retry logic
+  - watches playback, navigation, and room state
+  - applies remote sync with retry logic
 - `server/`
   - Express + Socket.io backend
-  - stores room state, room members, and room settings
-  - coordinates room-level playback events
+  - tracks room members, playback state, and room settings
+  - rebroadcasts room updates in real time
 
-### Current Sync Model
+### 🔒 Locked Rooms
 
-- The host is the preferred authority for room recovery.
-- In locked mode, only the host should be able to change tracks.
-- In unlocked mode, either side should be able to move the room to a new track.
-- Track navigation is treated as a stronger sync event than simple play/pause.
-- Manual sync requests try to recover:
-  - current song
-  - timestamp
-  - play/pause state
+- Host controls track changes
+- Listeners can still seek, play, and pause inside the current song
+- If a listener changes tracks, the app should pull them back to the host track
 
-### Recent Reliability Improvements
+### 🔓 Unlocked Rooms
 
-The latest jam-sync changes focus on desync recovery and SPA timing:
+- Listeners can also change tracks
+- Valid track changes should be able to move the whole room
 
-- host-authoritative `request_room_state` flow
-- compatibility fallback for older backend request format
-- multi-send state bursts for stronger authoritative rebroadcasts
-- retry-based remote state application until navigation and media are ready
-- smarter recovery around YouTube Music SPA navigation timing
-- local track fingerprint refresh after forced sync
+## 🚀 Recent Sync Improvements
 
-## Room Modes
+The latest work has focused on making desync recovery much stronger, especially around YouTube Music's SPA behavior.
 
-### Locked
+Recent improvements include:
 
-- Host controls song changes
-- Listeners can still play, pause, and seek inside the current track
-- If a listener changes songs, the app should pull them back to the host track
+- host-authoritative room-state requests
+- compatibility fallback for older backend request handling
+- stronger rebroadcast bursts for authoritative room state
+- retry-based remote track and playback application
+- smarter handling after YouTube navigation events
+- better recovery when host and listener drift onto different tracks
 
-### Unlocked
-
-- Listeners can also change songs
-- The room should follow valid track changes from either side
-
-## Manual Recovery Controls
+## 🛠 Manual Recovery
 
 ### `Sync With Host`
 
-Shown to listeners. This should force recovery back to the host's current:
+Listeners can press this to force recovery back to the host's:
 
-- track
+- current track
 - timestamp
 - playback state
 
 ### `Broadcast Host State`
 
-Shown to hosts. This rebroadcasts the host's current room state to help pull the room back into sync.
+Hosts can press this to rebroadcast their current room state and pull the room back into sync.
 
-## Project Structure
+## 🧱 Project Structure
 
 ```text
-.
-|-- electron-jam/
-|   |-- main.js
-|   |-- preload.js
-|   |-- package.json
-|   `-- build/icon.ico
-|-- server/
-|   `-- index.js
-|-- dev_log.md
-`-- prompt_history.md
+electron-jam/
+|-- main.js
+|-- preload.js
+|-- package.json
+`-- build/icon.ico
+
+server/
+`-- index.js
 ```
 
-## Key Files
+## 📁 Important Files
 
 - `main.js`
   - creates the Electron window
-  - removes YouTube Music CSP
-  - loads `preload.js`
-  - uses the packaged icon
+  - removes YouTube Music CSP restrictions
+  - loads the preload script
+  - applies the packaged app icon
 - `preload.js`
-  - injects the Jam UI
-  - handles Socket.io communication
-  - detects and applies playback / track sync
-  - contains most of the jam recovery logic
-- `../server/index.js`
-  - backend room coordination
-  - state storage and event rebroadcasting
+  - injects the Jam UI into YouTube Music
+  - manages Socket.io communication
+  - handles playback sync, track sync, and recovery logic
+- `server/index.js`
+  - manages room state
+  - tracks members and settings
+  - handles room-wide playback events
 
-## Build
+## 🏗 Build
 
-From `electron-jam/`:
+From inside `electron-jam/`:
 
 ```powershell
 npm install
@@ -143,47 +135,31 @@ Build artifact:
 YouTube Music Jam.exe
 ```
 
-## Packaging Notes
+## 📦 Packaging Notes
 
-- Runtime icon path: `build/icon.ico`
+- App icon path: `build/icon.ico`
 - `package.json` includes the icon in packaged files
-- `main.js` also references the same icon for the app window / taskbar
+- `main.js` uses the same icon at runtime for the desktop window and taskbar
 
-## Backend Notes
+## 🌐 Backend Notes
 
 - The backend is deployed on Railway
-- If `server/index.js` changes, Railway needs to be redeployed
-- Client and backend should stay on matching room-state request behavior for the best sync reliability
+- If `server/index.js` changes, Railway must be redeployed
+- Best results happen when both the client and backend are running matching sync logic
 
-## Local-Only Files
+## 🔍 Current Focus
 
-These files are for local workflow and should not be pushed to GitHub:
-
-- `../dev_log.md`
-- `../prompt_history.md`
-
-## Current Debugging Focus
-
-The app is already beyond basic sync support. The main remaining refinement area is **hard resync reliability** when users drift onto different tracks.
+The app already supports full jam rooms and recovery tools. The main refinement work right now is around **hard resync reliability**.
 
 Current focus areas:
 
-- `Sync With Host` reliability
-- `Broadcast Host State` reliability
+- `Sync With Host` consistency
+- `Broadcast Host State` consistency
 - unlocked listener-to-host track following
 - YouTube Music SPA navigation timing
-- detecting when navigation is truly complete before time/play state is re-applied
+- applying track, time, and play state only after navigation is truly ready
 
-## Dev Workflow Rule
-
-Every code change must be followed by a matching append-only entry in `dev_log.md` that includes:
-
-- timestamp
-- what changed
-- why it changed
-- files affected
-
-## Status
+## 📌 Status
 
 The app currently supports:
 
@@ -196,4 +172,4 @@ The app currently supports:
 - manual recovery controls
 - packaged desktop builds
 
-The current work is focused on making jam recovery feel dependable even when YouTube Music's SPA behavior is not.
+This project is actively being refined to make jam sessions feel solid even when YouTube Music navigation gets messy.
