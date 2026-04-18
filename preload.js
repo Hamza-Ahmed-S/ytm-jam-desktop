@@ -495,6 +495,7 @@ function injectJamUI() {
     let roomLocked = false;
     let pendingForcedTrackId = null;
     let pendingRemoteSync = null;
+    let pendingStateRequest = null;
     let remoteApplyToken = 0;
 
     const getLocalUsername = () => {
@@ -605,12 +606,30 @@ function injectJamUI() {
         return;
       }
 
+      const requestToken = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      pendingStateRequest = {
+        token: requestToken,
+        // Don't use lastRoomState.updatedAt as the floor here — we want the fresh
+        // host response to always win, even if we recently applied a cached state.
+        knownUpdatedAt: 0,
+        reason,
+      };
+
       log(`Requesting room state: ${reason}`);
       socket.emit('request_room_state', {
         roomCode,
         hostOnly: true,
         reason,
       });
+
+      setTimeout(() => {
+        if (!pendingStateRequest || pendingStateRequest.token !== requestToken) {
+          return;
+        }
+
+        log(`Falling back to legacy room state request: ${reason}`);
+        socket.emit('request_room_state', roomCode);
+      }, 1500);
     };
 
     const broadcastRoomStateBurst = (reason, pausedOverride = null) => {
@@ -675,6 +694,7 @@ function injectJamUI() {
           }
 
           lastRoomState = state;
+          lastTrackFingerprint = fingerprintTrack();
           pendingRemoteSync = null;
           pendingForcedTrackId = null;
           log(`Applied remote room state (${reason}) for ${state.trackId || state.url}`);
@@ -695,16 +715,45 @@ function injectJamUI() {
       }
     };
 
+    const navigateToTrack = (url) => {
+      // Try YouTube Music's internal SPA router first — it handles its own
+      // history and avoids a full page reload. Falls back to location.assign
+      // if the internal API isn't available.
+      try {
+        const ytApp = document.querySelector('ytmusic-app');
+        if (ytApp && typeof ytApp.navigate_ === 'function') {
+          const urlObj = new URL(url);
+          ytApp.navigate_(urlObj.pathname + urlObj.search);
+          log(`SPA navigate_ to ${url}`);
+          return;
+        }
+      } catch (_) {}
+
+      try {
+        window.history.pushState({}, '', url);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        log(`history.pushState navigate to ${url}`);
+        return;
+      } catch (_) {}
+
+      log(`Falling back to location.assign for ${url}`);
+      window.location.assign(url);
+    };
+
     const applyRemoteState = async (state, forcePlay, reason = 'room_state') => {
       if (!state || !state.url) {
         return;
       }
 
+      // Only reject as stale when the incoming state is clearly older (>5s behind)
+      // AND we are already on the correct track. This avoids blocking a fresh host
+      // response that arrives shortly after a stale cached server copy.
       if (
         lastRoomState &&
         Number.isFinite(lastRoomState.updatedAt) &&
         Number.isFinite(state.updatedAt) &&
-        state.updatedAt + 250 < lastRoomState.updatedAt
+        state.updatedAt + 5000 < lastRoomState.updatedAt &&
+        matchesTrackState(state)
       ) {
         log(`Ignoring stale room state for ${state.trackId || state.url}`);
         return;
@@ -720,7 +769,7 @@ function injectJamUI() {
           pendingForcedTrackId = state.trackId || state.url;
           isExternal = true;
           saveJamSession({ roomCode, username: getLocalUsername(), isHost: localIsHost });
-          window.location.assign(state.url);
+          navigateToTrack(state.url);
           return;
         }
 
@@ -824,12 +873,18 @@ function injectJamUI() {
         return;
       }
 
+      if (pendingStateRequest) {
+        // Always clear the pending request when a room_state arrives — both the
+        // server's cached copy and the fresh host response come via this event.
+        pendingStateRequest = null;
+      }
+
       log(`Received room state for ${state.trackId || 'unknown track'}`);
       applyRemoteState(state, !state.paused, 'room_state event');
     });
 
     socket.on('state_requested', (payload) => {
-      if (!payload || payload.roomCode !== roomCode || isExternal || payload.requesterSocketId === socket.id) {
+      if (!payload || payload.roomCode !== roomCode || payload.requesterSocketId === socket.id) {
         return;
       }
 
@@ -841,13 +896,12 @@ function injectJamUI() {
         return;
       }
 
+      // Respond even if we are currently applying a remote state — we are still the
+      // authority and our current track/time is the best answer we have.
+      // Reduced delay to 300ms so the fresh response beats the stale cached copy.
       setTimeout(() => {
-        if (pendingRemoteSync) {
-          log(`Skipping requested state broadcast while remote sync is pending (${payload.reason || 'no reason'})`);
-          return;
-        }
         broadcastRoomStateBurst(`state requested: ${payload.reason || 'no reason'}`);
-      }, 700);
+      }, 300);
     });
 
     socket.on('force_play', (state) => {
@@ -930,6 +984,8 @@ function injectJamUI() {
 
     window.addEventListener('yt-navigate-finish', () => {
       if (pendingRemoteSync) {
+        // Start trying immediately — finalizeRemoteState's retry loop handles
+        // cases where the video element isn't ready yet.
         setTimeout(() => {
           if (pendingRemoteSync) {
             finalizeRemoteState(
@@ -938,7 +994,7 @@ function injectJamUI() {
               `post-navigation ${pendingRemoteSync.reason}`
             );
           }
-        }, 900);
+        }, 300);
       }
 
       if (!roomCode || isExternal) {
@@ -991,6 +1047,48 @@ function injectJamUI() {
         requestAuthoritativeState('periodic locked-room drift check');
       }
     }, 3500);
+
+    // Watchdog: if a forced navigation was requested but the track still doesn't
+    // match after several seconds, re-attempt navigation directly. This catches
+    // cases where YouTube's SPA silently ignored the navigate attempt.
+    let watchdogAttempts = 0;
+    let watchdogTargetTrackId = null;
+    window.setInterval(() => {
+      if (!pendingForcedTrackId || isApplyingRemoteState) {
+        if (!pendingForcedTrackId) {
+          watchdogAttempts = 0;
+          watchdogTargetTrackId = null;
+        }
+        return;
+      }
+
+      const currentTrack = getCurrentTrackInfo();
+      if (currentTrack.trackId === pendingForcedTrackId) {
+        watchdogAttempts = 0;
+        watchdogTargetTrackId = null;
+        return;
+      }
+
+      if (watchdogTargetTrackId !== pendingForcedTrackId) {
+        watchdogTargetTrackId = pendingForcedTrackId;
+        watchdogAttempts = 0;
+      }
+
+      watchdogAttempts += 1;
+      if (watchdogAttempts > 5) {
+        log(`Watchdog giving up on forced navigation to ${pendingForcedTrackId} after 5 attempts`);
+        pendingForcedTrackId = null;
+        watchdogAttempts = 0;
+        watchdogTargetTrackId = null;
+        return;
+      }
+
+      if (pendingRemoteSync) {
+        log(`Watchdog re-attempting navigation to ${pendingForcedTrackId} (attempt ${watchdogAttempts}/5)`);
+        isExternal = true;
+        navigateToTrack(pendingRemoteSync.state.url);
+      }
+    }, 2500);
 
     lockToggle.addEventListener('change', () => {
       if (!roomCode || !localIsHost) {
