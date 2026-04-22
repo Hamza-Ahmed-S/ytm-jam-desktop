@@ -563,20 +563,26 @@ function injectJamUI() {
       log(`Joined jam room: ${roomCode} as ${username}`);
     };
 
-    const emitRoomState = (pausedOverride = null) => {
-      if (!roomCode) {
-        return;
-      }
-
+    const captureRoomState = (pausedOverride = null) => {
       const video = document.querySelector('video');
       const track = getCurrentTrackInfo();
-      socket.emit('sync_state', {
+      return {
         roomCode,
         url: track.url,
         trackId: track.trackId,
         time: video ? video.currentTime : 0,
         paused: pausedOverride !== null ? pausedOverride : (video ? video.paused : true),
-      });
+      };
+    };
+
+    const emitRoomState = (pausedOverride = null) => {
+      if (!roomCode) {
+        return;
+      }
+
+      const state = captureRoomState(pausedOverride);
+      socket.emit('sync_state', state);
+      const track = getCurrentTrackInfo();
       log(`Shared room state for ${track.trackId || 'unknown track'}`);
     };
 
@@ -630,6 +636,24 @@ function injectJamUI() {
         log(`Falling back to legacy room state request: ${reason}`);
         socket.emit('request_room_state', roomCode);
       }, 1500);
+    };
+
+    const requestHardSyncFromHost = (reason) => {
+      if (!roomCode) {
+        return;
+      }
+
+      log(`Requesting hard sync from host: ${reason}`);
+      socket.emit('request_hard_sync', {
+        roomCode,
+        reason,
+      });
+
+      // Keep the older request path as a compatibility fallback if the live
+      // backend has not been redeployed yet.
+      setTimeout(() => {
+        requestAuthoritativeState(`${reason} fallback`);
+      }, 1200);
     };
 
     const broadcastRoomStateBurst = (reason, pausedOverride = null) => {
@@ -718,7 +742,8 @@ function injectJamUI() {
     const navigateToTrack = (url) => {
       // Try YouTube Music's internal SPA router first — it handles its own
       // history and avoids a full page reload. Falls back to location.assign
-      // if the internal API isn't available.
+      // if the internal API isn't available. Do not use history.pushState here:
+      // it can fake the URL without loading the actual media track.
       try {
         const ytApp = document.querySelector('ytmusic-app');
         if (ytApp && typeof ytApp.navigate_ === 'function') {
@@ -729,18 +754,11 @@ function injectJamUI() {
         }
       } catch (_) {}
 
-      try {
-        window.history.pushState({}, '', url);
-        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-        log(`history.pushState navigate to ${url}`);
-        return;
-      } catch (_) {}
-
       log(`Falling back to location.assign for ${url}`);
       window.location.assign(url);
     };
 
-    const applyRemoteState = async (state, forcePlay, reason = 'room_state') => {
+    const applyRemoteState = async (state, forcePlay, reason = 'room_state', options = {}) => {
       if (!state || !state.url) {
         return;
       }
@@ -749,6 +767,7 @@ function injectJamUI() {
       // AND we are already on the correct track. This avoids blocking a fresh host
       // response that arrives shortly after a stale cached server copy.
       if (
+        !options.hardSync &&
         lastRoomState &&
         Number.isFinite(lastRoomState.updatedAt) &&
         Number.isFinite(state.updatedAt) &&
@@ -770,6 +789,16 @@ function injectJamUI() {
           isExternal = true;
           saveJamSession({ roomCode, username: getLocalUsername(), isHost: localIsHost });
           navigateToTrack(state.url);
+          setTimeout(() => {
+            if (pendingRemoteSync) {
+              finalizeRemoteState(state, forcePlay, `scheduled ${reason}`);
+            }
+          }, 1000);
+          setTimeout(() => {
+            if (pendingRemoteSync) {
+              finalizeRemoteState(state, forcePlay, `scheduled retry ${reason}`);
+            }
+          }, 3000);
           return;
         }
 
@@ -902,6 +931,38 @@ function injectJamUI() {
       setTimeout(() => {
         broadcastRoomStateBurst(`state requested: ${payload.reason || 'no reason'}`);
       }, 300);
+    });
+
+    socket.on('hard_sync_requested', (payload) => {
+      if (!payload || payload.roomCode !== roomCode || payload.requesterSocketId === socket.id) {
+        return;
+      }
+
+      if (!localIsHost) {
+        return;
+      }
+
+      const sendHostState = () => {
+        socket.emit('host_state_response', {
+          ...captureRoomState(),
+          requesterSocketId: payload.requesterSocketId,
+        });
+        log(`Sent hard sync host state for ${payload.reason || 'manual request'}`);
+      };
+
+      sendHostState();
+      setTimeout(sendHostState, 700);
+      setTimeout(sendHostState, 1600);
+    });
+
+    socket.on('hard_sync_state', (state) => {
+      if (!roomCode || !state || state.roomCode !== roomCode) {
+        return;
+      }
+
+      pendingStateRequest = null;
+      log(`Received hard sync state for ${state.trackId || 'unknown track'}`);
+      applyRemoteState(state, !state.paused, 'hard_sync_state', { hardSync: true });
     });
 
     socket.on('force_play', (state) => {
@@ -1120,7 +1181,7 @@ function injectJamUI() {
 
       status.textContent = 'Syncing with host...';
       status.style.color = '#ffffff';
-      requestAuthoritativeState('manual sync button');
+      requestHardSyncFromHost('manual sync button');
     });
 
     if (roomCode) {
