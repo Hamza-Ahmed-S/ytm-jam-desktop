@@ -1,7 +1,7 @@
 const { ipcRenderer } = require('electron');
 
 const SOCKET_IO_CDN = 'https://cdn.socket.io/4.7.4/socket.io.min.js';
-const SOCKET_SERVER_URL = 'https://ytm-jam-server-production.up.railway.app';
+const SOCKET_SERVER_URL = 'https://ytm-jam-server.onrender.com';
 const JAM_STORAGE_KEY = 'ytm-jam-session';
 
 let uiInjected = false;
@@ -153,10 +153,10 @@ function injectJamUI() {
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     #jam-hub-btn {
       position: fixed;
-      bottom: 88px;
+      bottom: clamp(12px, 10vh, 88px);
       right: 20px;
-      width: 52px;
-      height: 52px;
+      width: 48px;
+      height: 48px;
       background: linear-gradient(135deg, #5865f2, #7289da);
       border-radius: 50%;
       display: flex;
@@ -174,9 +174,13 @@ function injectJamUI() {
     }
     #jam-panel {
       position: fixed;
-      bottom: 152px;
+      bottom: clamp(68px, calc(10vh + 56px), 152px);
       right: 20px;
-      width: 300px;
+      width: min(300px, calc(100vw - 40px));
+      max-height: calc(100vh - clamp(140px, calc(10vh + 110px), 220px));
+      overflow-y: auto;
+      overflow-x: hidden;
+      box-sizing: border-box;
       border-radius: 16px;
       background: rgba(15, 16, 20, 0.97);
       backdrop-filter: blur(20px);
@@ -185,10 +189,22 @@ function injectJamUI() {
       z-index: 2147483646;
       color: #fff;
       font-family: 'Inter', sans-serif;
-      padding: 20px;
+      padding: 16px;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
       display: none;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(88, 101, 242, 0.4) transparent;
+    }
+    #jam-panel::-webkit-scrollbar {
+      width: 4px;
+    }
+    #jam-panel::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    #jam-panel::-webkit-scrollbar-thumb {
+      background: rgba(88, 101, 242, 0.4);
+      border-radius: 999px;
     }
     .jam-title {
       font-size: 15px;
@@ -406,6 +422,39 @@ function injectJamUI() {
       border: 1px solid rgba(174, 181, 255, 0.25);
       border-radius: 999px;
       padding: 2px 6px;
+    }
+    @media (max-height: 768px) {
+      #jam-panel {
+        padding: 12px;
+        gap: 8px;
+      }
+      .jam-btn {
+        padding: 8px 12px;
+        font-size: 13px;
+      }
+      .jam-input {
+        padding: 8px 12px;
+        font-size: 13px;
+      }
+      #jam-code-display {
+        font-size: 22px;
+        padding: 8px;
+      }
+      .jam-toggle-row {
+        padding: 8px 10px;
+      }
+      .jam-toggle-title {
+        font-size: 12px;
+      }
+      .jam-toggle-subtitle {
+        font-size: 10px;
+      }
+      #jam-members {
+        padding: 8px 10px;
+      }
+      .jam-members-title {
+        margin-bottom: 6px;
+      }
     }
   `;
   appendToHeadOrRoot(style);
@@ -649,15 +698,22 @@ function injectJamUI() {
         reason,
       });
 
-      // Keep the older request path as a compatibility fallback if the live
-      // backend has not been redeployed yet.
+      // Fallback to the older request path only if the direct hard sync did not
+      // arrive — prevents two competing applies when both paths succeed.
+      let hardSyncReceived = false;
+      const onHardSyncArrived = () => { hardSyncReceived = true; };
+      socket.once('hard_sync_state', onHardSyncArrived);
+
       setTimeout(() => {
-        requestAuthoritativeState(`${reason} fallback`);
+        socket.off('hard_sync_state', onHardSyncArrived);
+        if (!hardSyncReceived) {
+          requestAuthoritativeState(`${reason} fallback`);
+        }
       }, 1200);
     };
 
     const broadcastRoomStateBurst = (reason, pausedOverride = null) => {
-      if (!roomCode) {
+      if (!roomCode || isExternal) {
         return;
       }
 
@@ -729,12 +785,15 @@ function injectJamUI() {
         requestAuthoritativeState(`retry after failed remote apply: ${reason}`);
       } finally {
         if (applyToken === remoteApplyToken) {
+          // Clear immediately — a short delay was here to suppress video events
+          // that fire right after seek/play, but 200ms is enough for that.
+          // The old 1200ms delay was blocking the pending-recovery watchdog.
           setTimeout(() => {
             if (applyToken === remoteApplyToken) {
               isExternal = false;
               isApplyingRemoteState = false;
             }
-          }, 1200);
+          }, 200);
         }
       }
     };
@@ -1144,12 +1203,28 @@ function injectJamUI() {
         return;
       }
 
-      if (pendingRemoteSync) {
+      // Only navigate if pendingRemoteSync still targets the same track —
+      // if they diverged the target already changed and applyRemoteState
+      // will handle the new navigation.
+      if (
+        pendingRemoteSync &&
+        (pendingRemoteSync.state.trackId === pendingForcedTrackId ||
+          (!pendingRemoteSync.state.trackId && pendingRemoteSync.state.url))
+      ) {
         log(`Watchdog re-attempting navigation to ${pendingForcedTrackId} (attempt ${watchdogAttempts}/5)`);
         isExternal = true;
         navigateToTrack(pendingRemoteSync.state.url);
       }
     }, 2500);
+
+    // Host heartbeat: periodically rebroadcast full state so any listener that
+    // missed an event self-heals without needing manual Sync With Host.
+    window.setInterval(() => {
+      if (!roomCode || !localIsHost || isExternal) {
+        return;
+      }
+      emitRoomState();
+    }, 10000);
 
     lockToggle.addEventListener('change', () => {
       if (!roomCode || !localIsHost) {
